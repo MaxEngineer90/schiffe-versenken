@@ -33,3 +33,4 @@ Jeder weitere Push auf `main` veröffentlicht automatisch neu.
 
 - PeerJS: MIT (`site/vendor/peerjs-LICENSE.txt`)
 - Schriften Barlow und Big Shoulders Stencil Display: SIL Open Font License (`site/fonts/*-OFL.txt`)
+- 
