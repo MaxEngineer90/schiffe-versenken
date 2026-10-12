@@ -17,7 +17,7 @@ Jeder weitere Push auf `main` veröffentlicht automatisch neu.
 - **Gegen einen Menschen:** Einer klickt „Spiel erstellen“ und bekommt einen Raumcode. Der andere öffnet dieselbe Seite und tritt mit dem Code bei.
 - **Gegen den Computer:** Schwierigkeit wählen (Leichtmatrose, Bootsmann, Admiral) und „Ablegen“.
 - **Aufstellen:** Schiffe aufs Feld ziehen oder anklicken und dann auf ein Feld klicken. Ein platziertes Schiff anklicken dreht es, beim Ziehen dreht die Taste `R`. „Zufällig“ stellt alles auf einmal auf.
-- **Ton:** Schuss, Platschen, Explosion, Versenkt-Horn, Sieges-Fanfare. Ein- und ausschalten mit dem Lautsprecher-Knopf unten rechts oder der Taste `M`.
+- **Ton:** Torpedo-Abschuss, Detonation, Versenken mit ächzendem Stahl, Sonar-Ping, wenn du dran bist, und Schiffshorn am Ende. Ein- und ausschalten mit dem Lautsprecher-Knopf unten rechts oder der Taste `M`.
 - **Regeln** (stellt der Ersteller ein): nach einem Treffer nochmal schießen, Salvenmodus. Schiffe dürfen sich nie berühren – nur über Eck.
 
 ## Technik
@@ -33,4 +33,3 @@ Jeder weitere Push auf `main` veröffentlicht automatisch neu.
 
 - PeerJS: MIT (`site/vendor/peerjs-LICENSE.txt`)
 - Schriften Barlow und Big Shoulders Stencil Display: SIL Open Font License (`site/fonts/*-OFL.txt`)
-- 

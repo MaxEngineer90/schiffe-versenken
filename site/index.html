@@ -563,28 +563,51 @@ function rulesSummary() {
 /* ------------------------------------------------------------------ */
 /* Sound-Effekte (live erzeugt mit der Web Audio API, keine Dateien)   */
 /* ------------------------------------------------------------------ */
+const TRAVEL = 950; // Laufzeit des Torpedos in ms – so lange dauert es bis zum Einschlag
 const Sound = {
   on: store.get('sound', true),
-  ctx: null, master: null, noiseBuf: null,
+  ctx: null, master: null, noiseBuf: null, verb: null, echo: null,
   init() {
     if (this.ctx) { if (this.ctx.state === 'suspended') this.ctx.resume(); return true; }
     const AC = window.AudioContext || window.webkitAudioContext;
     if (!AC) return false;
-    this.ctx = new AC();
-    this.master = this.ctx.createGain();
-    this.master.gain.value = 1.0;
-    const comp = this.ctx.createDynamicsCompressor();
-    this.master.connect(comp); comp.connect(this.ctx.destination);
-    const len = this.ctx.sampleRate * 2;
-    this.noiseBuf = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
+    const c = this.ctx = new AC();
+    const comp = c.createDynamicsCompressor();
+    comp.threshold.value = -14; comp.ratio.value = 4;
+    this.master = c.createGain(); this.master.gain.value = 0.9;
+    this.master.connect(comp); comp.connect(c.destination);
+    // weißes Rauschen als Rohmaterial
+    const len = c.sampleRate * 3;
+    this.noiseBuf = c.createBuffer(1, len, c.sampleRate);
     const d = this.noiseBuf.getChannelData(0);
     for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+    // Hall (großer, dunkler Raum – Wasser, Stahlrumpf)
+    const ir = c.createBuffer(2, c.sampleRate * 2.6, c.sampleRate);
+    for (let ch = 0; ch < 2; ch++) {
+      const x = ir.getChannelData(ch);
+      for (let i = 0; i < x.length; i++) x[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / x.length, 3.2);
+    }
+    const conv = c.createConvolver(); conv.buffer = ir;
+    const vlp = c.createBiquadFilter(); vlp.type = 'lowpass'; vlp.frequency.value = 1800;
+    this.verb = c.createGain(); this.verb.gain.value = 1;
+    this.verb.connect(conv); conv.connect(vlp); vlp.connect(this.master);
+    // Echo fürs Sonar
+    const dl = c.createDelay(2); dl.delayTime.value = 0.42;
+    const fb = c.createGain(); fb.gain.value = 0.38;
+    const elp = c.createBiquadFilter(); elp.type = 'lowpass'; elp.frequency.value = 1600;
+    this.echo = c.createGain(); this.echo.gain.value = 1;
+    this.echo.connect(dl); dl.connect(elp); elp.connect(fb); fb.connect(dl); elp.connect(this.master);
     return true;
   },
-  env(g, t, a, dur, peak) {
-    g.gain.setValueAtTime(0.0001, t);
-    g.gain.exponentialRampToValueAtTime(peak, t + a);
-    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  out(node, o) {
+    node.connect(this.master);
+    if (o.verb) { const g = this.ctx.createGain(); g.gain.value = o.verb; node.connect(g); g.connect(this.verb); }
+    if (o.echo) { const g = this.ctx.createGain(); g.gain.value = o.echo; node.connect(g); g.connect(this.echo); }
+  },
+  env(param, t, a, dur, peak) {
+    param.setValueAtTime(0.0001, t);
+    param.exponentialRampToValueAtTime(peak, t + a);
+    param.exponentialRampToValueAtTime(0.0001, t + dur);
   },
   tone(freq, dur, o) {
     o = o || {};
@@ -592,24 +615,36 @@ const Sound = {
     const osc = c.createOscillator(), g = c.createGain();
     osc.type = o.type || 'sine';
     osc.frequency.setValueAtTime(freq, t);
-    if (o.to) osc.frequency.exponentialRampToValueAtTime(o.to, t + dur);
+    if (o.to) osc.frequency.exponentialRampToValueAtTime(o.to, t + (o.glide || dur));
+    if (o.vib) { const l = c.createOscillator(), lg = c.createGain(); l.frequency.value = o.vib; lg.gain.value = o.vibDepth || 2; l.connect(lg); lg.connect(osc.frequency); l.start(t); l.stop(t + dur + 0.1); }
     let node = osc;
-    if (o.lp) { const f = c.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = o.lp; osc.connect(f); node = f; }
-    node.connect(g); g.connect(this.master);
-    this.env(g, t, o.attack || 0.01, dur, o.gain || 0.3);
-    osc.start(t); osc.stop(t + dur + 0.05);
+    if (o.lp) { const f = c.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = o.lp; f.Q.value = o.q || 0.7; osc.connect(f); node = f; }
+    node.connect(g);
+    this.env(g.gain, t, o.attack || 0.01, dur, o.gain || 0.3);
+    this.out(g, o);
+    osc.start(t); osc.stop(t + dur + 0.1);
   },
   noise(dur, o) {
     const c = this.ctx, t = c.currentTime + (o.delay || 0);
-    const src = c.createBufferSource(); src.buffer = this.noiseBuf;
-    src.playbackRate.value = o.rate || 1;
-    const f = c.createBiquadFilter(); f.type = o.filter || 'lowpass'; f.Q.value = o.q || 0.8;
+    const src = c.createBufferSource(); src.buffer = this.noiseBuf; src.playbackRate.value = o.rate || 1;
+    const f = c.createBiquadFilter(); f.type = o.filter || 'lowpass'; f.Q.value = o.q || 0.7;
     f.frequency.setValueAtTime(o.from, t);
     if (o.to) f.frequency.exponentialRampToValueAtTime(o.to, t + dur);
     const g = c.createGain();
-    src.connect(f); f.connect(g); g.connect(this.master);
-    this.env(g, t, o.attack || 0.01, dur, o.gain || 0.4);
-    src.start(t, Math.random()); src.stop(t + dur + 0.05);
+    src.connect(f); f.connect(g);
+    if (o.trem) { // Flattern, z. B. Schraube oder Blasen
+      const am = c.createGain(); am.gain.value = 0.5;
+      const l = c.createOscillator(), lg = c.createGain(); l.frequency.value = o.trem; lg.gain.value = 0.5;
+      l.connect(lg); lg.connect(am.gain); g.connect(am); this.out(am, o); l.start(t); l.stop(t + dur + 0.1);
+    } else this.out(g, o);
+    this.env(g.gain, t, o.attack || 0.01, dur, o.gain || 0.4);
+    src.start(t, Math.random() * 1.5); src.stop(t + dur + 0.1);
+  },
+  bubbles(n, start, span, o) {
+    for (let i = 0; i < n; i++) {
+      const f = 220 + Math.random() * 480;
+      this.tone(f, 0.05 + Math.random() * 0.05, { to: f * (1.6 + Math.random()), glide: 0.04, gain: (o && o.gain) || 0.05, delay: start + Math.random() * span, verb: 0.2 });
+    }
   },
   play(name) {
     if (!this.on || !this.init()) return;
@@ -618,44 +653,65 @@ const Sound = {
   toggle() {
     this.on = !this.on;
     store.set('sound', this.on);
-    if (this.on) this.play('place');
+    if (this.on) this.play('select');
     renderSoundButton();
   }
 };
 const SFX = {
-  place: (s) => { s.tone(520, 0.08, { type: 'triangle', gain: 0.45 }); s.noise(0.06, { filter: 'bandpass', from: 1800, q: 1.5, gain: 0.35 }); },
-  rotate: (s) => { s.tone(700, 0.05, { type: 'triangle', gain: 0.18 }); s.tone(950, 0.05, { type: 'triangle', gain: 0.18, delay: 0.06 }); },
-  shuffle: (s) => { [0, 0.06, 0.12, 0.18, 0.24].forEach((d, i) => s.tone(400 + i * 90, 0.05, { type: 'triangle', gain: 0.15, delay: d })); },
-  error: (s) => { s.tone(150, 0.2, { type: 'square', gain: 0.3, lp: 900 }); },
-  select: (s) => { s.tone(880, 0.06, { type: 'sine', gain: 0.3 }); },
-  fire: (s) => { s.noise(0.34, { filter: 'bandpass', from: 2600, to: 380, q: 1.0, gain: 0.9 }); s.tone(220, 0.14, { type: 'sine', to: 80, gain: 0.45 }); },
+  // Aufstellen: gedämpfte, metallische Werftgeräusche
+  place: (s) => { s.noise(0.09, { filter: 'bandpass', from: 700, q: 4, gain: 1.0 }); s.tone(95, 0.18, { to: 70, gain: 0.7 }); },
+  rotate: (s) => { s.noise(0.05, { filter: 'bandpass', from: 1400, q: 3, gain: 0.8 }); s.noise(0.06, { filter: 'bandpass', from: 1100, q: 3, gain: 0.8, delay: 0.08 }); },
+  shuffle: (s) => { [0, 0.11, 0.22, 0.33, 0.44].forEach((d) => { s.noise(0.08, { filter: 'bandpass', from: 600 + Math.random() * 300, q: 6, gain: 0.35, delay: d }); s.tone(90, 0.12, { to: 70, gain: 0.2, delay: d }); }); },
+  error: (s) => { s.tone(70, 0.3, { type: 'sawtooth', gain: 0.5, lp: 300 }); },
+  select: (s) => { s.noise(0.04, { filter: 'bandpass', from: 1800, q: 2, gain: 0.7 }); },
+  // Torpedo: Druckluftausstoß, dann Lauf unter Wasser mit Schraube und Blasen
+  fire: (s) => {
+    s.tone(70, 0.35, { to: 34, gain: 0.7 });
+    s.noise(0.3, { filter: 'lowpass', from: 900, to: 180, gain: 0.7, attack: 0.004, verb: 0.3 });
+    s.noise(0.95, { filter: 'lowpass', from: 520, to: 320, q: 1.4, gain: 0.32, attack: 0.12, delay: 0.12, trem: 22, verb: 0.25 });
+    s.tone(140, 0.85, { type: 'sawtooth', to: 120, gain: 0.05, lp: 300, attack: 0.15, delay: 0.12 });
+    s.bubbles(14, 0.08, 0.8, { gain: 0.045 });
+  },
+  // Fehlschuss: Detonation in der Ferne, Wassersäule fällt zurück
   miss: (s) => {
-    s.noise(0.7, { filter: 'lowpass', from: 1600, to: 260, gain: 0.8, attack: 0.02 });
-    s.noise(0.35, { filter: 'highpass', from: 2500, gain: 0.12, delay: 0.05 });
-    s.tone(260, 0.3, { type: 'sine', to: 110, gain: 0.18 });
+    s.tone(55, 0.6, { to: 30, gain: 0.55, verb: 0.4 });
+    s.noise(0.5, { filter: 'lowpass', from: 450, to: 120, gain: 0.5, attack: 0.005, verb: 0.5 });
+    s.noise(1.4, { filter: 'bandpass', from: 1300, to: 500, q: 0.6, gain: 0.22, attack: 0.18, delay: 0.12, verb: 0.3 });
+    s.bubbles(8, 0.2, 0.9, { gain: 0.03 });
   },
+  // Treffer: harter Knall am Stahlrumpf, tiefer Donner, Grollen
   hit: (s) => {
-    s.noise(0.9, { filter: 'lowpass', from: 2200, to: 140, gain: 0.8, attack: 0.005 });
-    s.tone(140, 0.55, { type: 'sine', to: 38, gain: 0.6 });
-    s.noise(0.25, { filter: 'highpass', from: 3000, gain: 0.15 });
+    s.noise(0.12, { filter: 'highpass', from: 1800, gain: 0.55, attack: 0.002 });
+    s.tone(62, 1.5, { to: 24, gain: 0.95, attack: 0.004, verb: 0.5 });
+    s.noise(2.2, { filter: 'lowpass', from: 1500, to: 70, gain: 0.9, attack: 0.004, verb: 0.6 });
+    s.noise(1.6, { filter: 'lowpass', from: 300, to: 60, gain: 0.45, attack: 0.25, delay: 0.25, trem: 7 });
   },
+  // Versenkt: Zweitexplosion, ächzender Stahl, aufsteigende Luftblasen
   sunk: (s) => {
     SFX.hit(s);
-    s.noise(1.3, { filter: 'lowpass', from: 900, to: 80, gain: 0.7, delay: 0.18 });
-    s.tone(90, 1.1, { type: 'sine', to: 30, gain: 0.55, delay: 0.18 });
-    s.tone(110, 0.7, { type: 'sawtooth', gain: 0.14, lp: 700, delay: 0.75, attack: 0.08 });
-    s.tone(165, 0.7, { type: 'sawtooth', gain: 0.1, lp: 700, delay: 0.75, attack: 0.08 });
+    s.tone(48, 2.2, { to: 22, gain: 0.6, delay: 0.38, attack: 0.01, verb: 0.6 });
+    s.noise(2.6, { filter: 'lowpass', from: 900, to: 50, gain: 0.55, delay: 0.38, attack: 0.01, verb: 0.7 });
+    s.tone(68, 1.8, { type: 'sawtooth', to: 44, gain: 0.12, lp: 240, q: 4, delay: 1.1, attack: 0.3, vib: 3, vibDepth: 4, verb: 0.5 });
+    s.tone(103, 1.4, { type: 'sawtooth', to: 80, gain: 0.07, lp: 300, q: 5, delay: 1.5, attack: 0.3, vib: 2.3, vibDepth: 3, verb: 0.5 });
+    s.bubbles(26, 1.4, 2.0, { gain: 0.05 });
   },
-  turn: (s) => { s.tone(880, 0.16, { gain: 0.16 }); s.tone(1320, 0.22, { gain: 0.14, delay: 0.1 }); },
-  join: (s) => { [523, 659, 784].forEach((f, i) => s.tone(f, 0.25, { type: 'triangle', gain: 0.2, delay: i * 0.1 })); },
+  // Du bist dran: Sonar-Ping mit Echo
+  turn: (s) => { s.tone(1180, 0.9, { gain: 0.22, attack: 0.004, echo: 0.55, verb: 0.3 }); },
+  join: (s) => { s.tone(980, 0.7, { gain: 0.18, attack: 0.004, echo: 0.5 }); s.tone(1180, 0.7, { gain: 0.16, attack: 0.004, delay: 0.5, echo: 0.5 }); },
+  // Sieg: zwei lange Signale aus dem Schiffshorn
   win: (s) => {
-    [523, 659, 784, 1047].forEach((f, i) => s.tone(f, 0.22, { type: 'triangle', gain: 0.28, delay: i * 0.13 }));
-    [523, 659, 784].forEach((f) => s.tone(f, 1.1, { type: 'triangle', gain: 0.2, delay: 0.6, attack: 0.03 }));
-    s.tone(1047, 1.1, { type: 'square', gain: 0.06, lp: 2000, delay: 0.6, attack: 0.03 });
+    const horn = (f, d, len) => {
+      s.tone(f, len, { type: 'sawtooth', gain: 0.22, lp: 650, q: 1.2, attack: 0.12, delay: d, verb: 0.5 });
+      s.tone(f * 1.5, len, { type: 'sawtooth', gain: 0.12, lp: 650, q: 1.2, attack: 0.12, delay: d, verb: 0.5 });
+      s.tone(f / 2, len, { type: 'square', gain: 0.08, lp: 300, attack: 0.15, delay: d });
+    };
+    horn(110, 0, 0.9); horn(110, 1.2, 2.0);
   },
+  // Niederlage: tiefes, abfallendes Horn und Grollen
   lose: (s) => {
-    [392, 330, 262].forEach((f, i) => s.tone(f, 0.38, { type: 'sawtooth', gain: 0.16, lp: 1100, delay: i * 0.32 }));
-    s.tone(196, 1.2, { type: 'sawtooth', to: 150, gain: 0.16, lp: 900, delay: 0.96 });
+    s.tone(98, 2.6, { type: 'sawtooth', to: 70, gain: 0.32, lp: 500, attack: 0.25, verb: 0.6 });
+    s.tone(147, 2.6, { type: 'sawtooth', to: 104, gain: 0.15, lp: 500, attack: 0.25, verb: 0.6 });
+    s.noise(3, { filter: 'lowpass', from: 200, to: 50, gain: 0.4, attack: 0.6, trem: 5 });
   }
 };
 function impactSound(results) {
@@ -1103,7 +1159,7 @@ function viewBattle() {
   let bCls = '', bText;
   if (S.over === 'win') { bCls = 'win'; bText = 'Sieg! Die feindliche Flotte ist versenkt.'; }
   else if (S.over === 'lose') bText = 'Niederlage – deine Flotte liegt auf dem Meeresgrund.';
-  else if (S.waiting) bText = 'Feuer! Warte auf Meldung …';
+  else if (S.waiting) bText = 'Torpedo läuft …';
   else if (S.myTurn) { bCls = 'mine'; bText = S.settings.salvo ? 'Du bist dran – wähle ' + k + (k === 1 ? ' Ziel' : ' Ziele') : 'Du bist dran – Feuer frei!'; }
   else bText = esc(oppName()) + ' zielt …';
   const unshot = 100 - S.shots.size;
@@ -1189,7 +1245,7 @@ function beginBattle(meFirst) {
   S.rematchMe = false; S.rematchOpp = false; S.waiting = false;
   S.myTurn = meFirst;
   S.msg = meFirst ? 'Du eröffnest das Gefecht.' : oppName() + ' eröffnet das Gefecht.';
-  if (meFirst) Sound.play('turn');
+  if (meFirst) setTimeout(() => Sound.play('turn'), 300);
   S.screen = 'battle';
   render();
   if (S.mode === 'ai' && !meFirst) scheduleAI();
@@ -1198,19 +1254,18 @@ function fire(cells) {
   if (!S.myTurn || S.waiting || S.over || !cells.length) return;
   S.salvoSel = [];
   Sound.play('fire');
+  S.waiting = true;
+  S.fireAt = Date.now();
+  render();
   if (S.mode === 'ai') {
-    S.waiting = true;
-    render();
     const gen = S.gen;
     setTimeout(() => {
       if (gen !== S.gen) return;
       const res = resolveShots(S.aiShips, S.aiIncoming, cells);
       onMyResult(res.results, res.allSunk);
-    }, 300);
+    }, TRAVEL);
   } else {
-    S.waiting = true;
     send({ t: 'fire', cells });
-    render();
   }
 }
 function onMyResult(results, allSunk) {
@@ -1236,20 +1291,26 @@ function onMyResult(results, allSunk) {
 }
 function onIncoming(cells) {
   if (!cells.length) return;
+  // Ergebnis sofort berechnen und melden, auf dem eigenen Bildschirm erst nach der Torpedo-Laufzeit zeigen
   const res = resolveShots(S.ships, S.incoming, cells);
   if (S.mode === 'pvp') send({ t: 'result', results: res.results, allSunk: res.allSunk });
   if (S.mode === 'ai') S.ai.learn(res.results);
-  S.lastIncoming = res.results.map((x) => key(x.r, x.c));
-  S.msg = msgTheirs(res.results);
   Sound.play('fire');
-  const impact = impactSound(res.results);
-  setTimeout(() => Sound.play(impact), 280);
-  if (res.allSunk) { endGame('lose'); return; }
-  const keep = keepsTurn(res.results);
-  S.myTurn = !keep;
-  if (!keep) { const gen = S.gen; setTimeout(() => { if (gen === S.gen && S.myTurn && !S.over) Sound.play('turn'); }, impact === 'sunk' ? 1500 : 950); }
-  render();
-  if (keep && S.mode === 'ai') scheduleAI();
+  const m = $('.bmsg'); if (m) m.textContent = 'Torpedo im Wasser!';
+  const gen = S.gen;
+  setTimeout(() => {
+    if (gen !== S.gen || S.over) return;
+    S.lastIncoming = res.results.map((x) => key(x.r, x.c));
+    S.msg = msgTheirs(res.results);
+    const impact = impactSound(res.results);
+    Sound.play(impact);
+    if (res.allSunk) { endGame('lose'); return; }
+    const keep = keepsTurn(res.results);
+    S.myTurn = !keep;
+    if (!keep) setTimeout(() => { if (gen === S.gen && S.myTurn && !S.over && !S.waiting) Sound.play('turn'); }, impact === 'sunk' ? 2600 : impact === 'hit' ? 1700 : 1100);
+    render();
+    if (keep && S.mode === 'ai') scheduleAI();
+  }, TRAVEL);
 }
 function scheduleAI() {
   const gen = S.gen;
@@ -1290,7 +1351,7 @@ function endGame(result) {
   S.myTurn = false; S.waiting = false; S.salvoSel = [];
   if (S.mode === 'pvp') send({ t: 'reveal', ships: S.ships.map(pub) });
   else S.oppReveal = S.aiShips.map(pub);
-  setTimeout(() => Sound.play(result === 'win' ? 'win' : 'lose'), result === 'win' ? 1200 : 1400);
+  setTimeout(() => Sound.play(result === 'win' ? 'win' : 'lose'), S.msg.indexOf('Flagge') >= 0 ? 300 : 2400);
   S.modal = 'end';
   render();
 }
@@ -1583,7 +1644,10 @@ function onMessage(m) {
       if (S.screen === 'battle' && !S.over && !S.myTurn) onIncoming(cleanCells(m.cells));
       break;
     case 'result':
-      if (S.screen === 'battle' && S.waiting) onMyResult(cleanResults(m.results), !!m.allSunk);
+      if (S.screen === 'battle' && S.waiting) {
+        const results = cleanResults(m.results), allSunk = !!m.allSunk, gen = S.gen;
+        setTimeout(() => { if (gen === S.gen && S.waiting) onMyResult(results, allSunk); }, Math.max(0, TRAVEL - (Date.now() - S.fireAt)));
+      }
       break;
     case 'reveal':
       if (S.screen === 'battle' && S.over && Array.isArray(m.ships)) { S.oppReveal = m.ships.slice(0, 5).map(cleanShip).filter(Boolean); render(); }
